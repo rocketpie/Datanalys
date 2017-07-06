@@ -1,10 +1,42 @@
 <#
-	.DESCRIPTION
+	.SYNOPSIS
 		put data into buckets
 
-	.EXAMPLE 
-		1..100 | Bucketeer -Buckets '[1-9]','([1-9]{2})'
+	.PARAM KeyFunctions
+		most key functions will look something like 
+		{ param ($data) if($data -match 'some(regex)') { 'match' } }
 
+		Tip: for quick and good effect effect, the key should be a number.
+
+		the default key function will look for the first number in the data and emit that as its key.
+
+	.PARAM SortFunction
+		custom argument to $buckets | sort $SortFunction 
+
+		the default sort function will try to sort the data as it were a number, and fallback to alphabetic sort  
+
+	.PARAM Width
+		width of the diagram to create (the bin with the most data in it will be shown this wide)
+
+	.PARAM ReturnData
+		instead of plotting anything, return the map key -> data[]
+		useful for debugging or further analysis of specific buckets
+		
+	.DESCRIPTION
+		Data analysis tool to categorize and visualize data size.
+		accepts key functions to be run on every data.
+		key functions are expected to emit the key of the bucket to put the data into.
+		
+		data that no key is emitted for flows into the '_rest' bin.
+		data that more than one key function emits a key for flows into the '_overlap' bin. 
+
+		afterwards, a bar chart shows relative bin sizes.
+
+	.EXAMPLE 
+		1..100 | %{[System.Random]::new().Next(100)} | Bucketeer 
+
+	.EXAMPLE 
+		gc datafile.txt | Bucketeer { param($data) if($data -match 'regex (iterest)') { if(Matches[1] -gt $threshold) { 'interesting'; return } Matches[1] }}
 
 #>
 [CmdletBinding()]
@@ -12,13 +44,13 @@ Param (
 	[Parameter(Mandatory=$True, ValueFromPipeline=$True)]
 	$Data,
 
-	[Parameter(Mandatory=$True, Position = 0)]
-	[string[]]
-	$Buckets,
-
+	[Parameter(Mandatory=$False, Position = 0)]
+	[ScriptBlock[]]
+	$KeyFunctions = { param($data) if($data -match '(\d+)') { $Matches[1] } },
+	
 	[Parameter(Mandatory=$False, Position = 1)]
-	[string[]]
-	$BucketLabels,
+	[ScriptBlock]
+	$SortFunction = {[int]$i = 0; if([int]::TryParse($_, [ref] $i)) { $i } else { $_ }},
 
 	[Parameter()]
 	[int]
@@ -26,35 +58,34 @@ Param (
 
 	[Parameter()]
 	[switch]
-	$ReturnBuckets = $False
+	$ReturnData = $False
 )
 Begin {
+	$restLabel = '_rest'
+	$overlapLabel = '_overlap'
+	$averageLabel = 'average'
+	$barChar = '#'
+	
 	function DebugVar { 
 		Param($Name, $Value)
 		Write-Debug "$($Name.PadRight(10)): $Value"	
 	}
-
-	# Bucket object definition
-	function New-Bucket { 
-		$result = New-Object PSObject
-									  # string  identifier to display. (i.e. original bucket regex?)
-		$result | Add-Member NoteProperty -Name Label -Value $null         
-						  # Func<t_data, bool>  Function to determine wether or not a data belongs into this basket
-		$result | Add-Member NoteProperty -Name Analyzer -Value $null   
-								# List[Object]  list of data items in this basket
-		$result | Add-Member NoteProperty -Name Data -Value (New-Object System.Collections.Generic.List[System.Object])
-		$result
+	function VerboseVar { 
+		Param($Name, $Value)
+		Write-Verbose "$($Name.PadRight(10)): $Value"	
 	}
 
-	function Create-Bucket {
-		Param( [string]$Pattern, [string]$Label )		
-		$result = New-Bucket
-		$result.Label = $Label
+	function AddData {
+		Param($Dict, $Key, $Data)
 		
-		$regex = [System.Text.RegularExpressions.Regex]::new($Pattern)			
-		$result.Analyzer = { Param($Data) $regex.IsMatch($Data) }.GetNewClosure()
-		
-		$result
+		if($Dict.ContainsKey($Key)) {
+			$Dict[$Key].Add($Data)
+		}
+		else {
+			$list = New-Object System.Collections.Generic.List[System.Object]
+			$list.Add($Data)
+			$Dict.Add($Key, $list)
+		}
 	}
 
 	if($PSBoundParameters['Debug']){
@@ -63,84 +94,75 @@ Begin {
 	
 	Write-Debug "Begin"
 	
-	# augment missing bucket labels with the definiton regexs
-	if($BucketLabels -eq $null) {
-		Write-Debug "augmenting all bucket labels"
-		$BucketLabels = $Buckets
-	}
-	if($BucketLabels.Length -lt $Buckets.Length) {
-		for($i = $BucketLabels.Length; $i -lt $Buckets.Length; $i++) {
-			Write-Debug "augmenting label for bucket $($Buckets[$i])"
-			$BucketLabels += @($Buckets[$i]) 
-		}	
-	}
+	$buckets = @{}
+	$rest = New-Object System.Collections.Generic.List[System.Object]
+	$overlap = New-Object System.Collections.Generic.List[System.Object]
 
-	$bucketList = @();		
-	for($i = 0; $i -lt $Buckets.Length; $i++) {
-		Write-Debug "creating Bucket '$($BucketLabels[$i])' for data matching /$($Buckets[$i])/"
-		$bucket = Create-Bucket $Buckets[$i] $BucketLabels[$i]
-	    $bucketList += @($bucket) 
+	foreach($key in $Order) {
+		$list = New-Object System.Collections.Generic.List[System.Object]
+		$buckets.Add($Key, $list)
 	}
-
-	$rest = New-Bucket 
-	$rest.Label = 'none'	
-	Write-Debug "creating Bucket '$($rest.Label)' for data matching no other bucket"
-
-	$overlap = New-Bucket
-	$overlap.label = 'overlap'
-	Write-Debug "creating Bucket '$($overlap.Label)' for data that matches more than one bucket"
 }
 
 Process {
 	$data = $_	
+	VerboseVar '$data' $data
 	
-	#if($data -is [Microsoft.PowerShell.Commands.MatchInfo]){
-	#	Write-Debug $data.GetType()
-	#}
-
 	$matchCount = 0;
-	foreach($bucket in $bucketList) {
-		if((&$bucket.Analyzer $data) -eq $true) {
-			Write-Verbose "'$data' matches bucket '$($bucket.Label)'"
-			$bucket.Data.Add($data)
-			$matchCount++;
+	foreach($keyFunc in $KeyFunctions) {
+		$key = &$keyFunc $data				
+		
+		if($key) {
+			if($key -is [System.Array]) {
+				foreach($i in $key) {
+					VerboseVar '$key' $i	
+					AddData $buckets $key $data 
+					$matchCount++;		
+				}
+			}
+			else {		
+				VerboseVar '$key' $key
+				AddData $buckets $key $data 
+				$matchCount++;		
+			}
 		}
 	}
 
 	if($matchCount -eq 0) { 
-		Write-Verbose "'$data' matches no bucket"
-	    $rest.Data.Add($data)
+		Write-Verbose "data matches no bucket"
+	    $rest.Add($data)
 	}
 	if($matchCount -gt 1) {
-		Write-Verbose "'$data' overlaps $matchCount buckets"
-		$overlap.Data.Add($data)
+		Write-Verbose "data overlaps $matchCount buckets"
+		$overlap.Add($data)
 	}
 }
 
 End {
 	Write-Debug "End"
 	
-	if($ReturnBuckets)	{
-			$bucketList += @($rest)
-			$bucketList += @($overlap)
+	if($ReturnData)	{
+			$buckets.Add($restLabel, $rest)
+			$buckets.Add($overlapLabel, $overlap)
 
-		$bucketList
+		$buckets
 		Exit
 	}
 	
-	# bucket data count measure
-	$measure = $bucketList | %{ $_.Data.Count } | Measure-Object -Average -Maximum -Minimum
-	# $measure 
-
 	# line everything up nice
-	$labelPadding = ($bucketList | %{ $_.Label.Length } |  Measure-Object -Maximum).Maximum 
+	$measure = $buckets.Values | %{ $_.Count } | Measure-Object -Average -Maximum -Minimum	
 	$countPadding = $measure.Maximum.ToString().Length
+	
+	$labelPadding = ($buckets.Keys | %{ $_.Length } |  Measure-Object -Maximum).Maximum 
+	if($overlapLabel.Length -gt $labelPadding){ $labelPadding = $overlapLabel.Length }
+	if($restLabel.Length -gt $labelPadding){ $labelPadding = $restLabel.Length }
+
 	DebugVar '$labelPadding' $labelPadding
 	DebugVar '$countPadding' $countPadding
 
 	
 	# print special 'bucket' data
-	(@{ Label=$rest.Label; Count=$rest.Data.Count }),(@{ Label=$overlap.Label; Count=$overlap.Data.Count }),(@{ Label='average'; Count=$measure.Average }),(@{ Label='#'; Count=([decimal]$measure.Maximum / [decimal]$Width) }) | %{
+	(@{ Label=$restLabel; Count=$rest.Count }),(@{ Label=$overlapLabel; Count=$overlap.Count }),(@{ Label=$averageLabel; Count=$measure.Average }),(@{ Label=$barChar; Count=([decimal]$measure.Maximum / [decimal]$Width) }) | %{
 		$labelPadded = $_.Label.PadLeft($labelPadding + 4)			
 		"$labelPadded : $($_.Count)"
 	}
@@ -149,13 +171,13 @@ End {
 	"".PadRight($labelPadding + $countPadding + $Width + 5, '=') 
 	
 	# bucket data output		
-	foreach($bucket in $bucketList) {
-		$datawidth = ( [decimal]$bucket.Data.Count / [decimal]$measure.Maximum ) * $Width
+	foreach($key in ($buckets.Keys | sort $SortKeys)) {
+		$datawidth = ( [decimal]$buckets[$key].Count / [decimal]$measure.Maximum ) * $Width
 		DebugVar '$datawidth' $datawidth
 
-		$labelPadded = $bucket.Label.PadLeft($labelPadding)
-		$countPadded = $bucket.Data.Count.ToString().PadLeft($countPadding)
-		$barVisual = ''.PadRight($datawidth, '#')
+		$labelPadded = $key.PadLeft($labelPadding)
+		$countPadded = $buckets[$key].Count.ToString().PadLeft($countPadding)
+		$barVisual = ''.PadRight($datawidth, $barChar)
 
 		"$labelPadded ($countPadded): $barVisual"
 	}
