@@ -1,27 +1,34 @@
 <#
 	.SYNOPSIS
-		put data into buckets
+		puts data into buckets, then visualizes relative bucket sizes (like a histogram or spectrum)
 
-	.PARAM KeyFunctions
+	.PARAMETER Data
+		The data to analyze (e.g. lines in a file)
+		When -Render is set, this is the hashTable[key] => [] as retured by -ReturnData
+
+	.PARAMETER KeyFunctions
 		most key functions will look something like 
 		{ param ($data) if($data -match 'some(regex)') { 'match' } }
 
-		Tip: for quick and good effect effect, the key should be a number.
+		Tip: for quick and good effect effect, the key should be an int.
+		the default key function will emit the first number in a data and emit that as key.
 
-		the default key function will look for the first number in the data and emit that as its key.
-
-	.PARAM SortFunction
+	.PARAMETER SortFunction
 		custom argument to $buckets | sort $SortFunction 
 
-		the default sort function will try to sort the data as it were a number, and fallback to alphabetic sort  
+		the default function tries to interpret keys as ints and falls back to alphanumeric  
 
-	.PARAM Width
-		width of the diagram to create (the bin with the most data in it will be shown this wide)
+	.PARAMETER Width
+		width of the diagram to create (the bin with the most data will be shown this wide)
 
-	.PARAM ReturnData
-		instead of plotting anything, return the map key -> data[]
+	.PARAMETER ReturnData
+		instead of plotting anything, return the map[key] -> data[]
 		useful for debugging or further analysis of specific buckets
 		
+	.PARAMETER Render
+		instead of bucketeering, take a map[key] -> data[]
+		and render it into a histogram
+
 	.DESCRIPTION
 		Data analysis tool to categorize and visualize data size.
 		accepts key functions to be run on every data.
@@ -37,30 +44,51 @@
 
 	.EXAMPLE 
 		gc datafile.txt | Bucketeer { param($data) if($data -match 'regex (iterest)') { if(Matches[1] -gt $threshold) { 'interesting'; return } Matches[1] }}
+	
+	.EXAMPLE
+		$data = gc datafile.txt | Bucketeer -ReturnData
+		$data | Bucketeer -Render		
 
+	.EXAMPLE
+		$keyFunc = { param($data) if($data -match '(\d+)') { $Matches[1]; $Matches[2] } }
+		$data = gc datafile.txt | Bucketeer $keyFunc -ReturnData
+		&$keyFunc $data['_overlap'][0]		
+		
+		Description
+		-----------
+		example keyFunc debugging setup
+		put the keyFunc in a variable, then inspect individual data
+		
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Bucketeer')]
 Param (
-	[Parameter(Mandatory=$True, ValueFromPipeline=$True)]
+	[Parameter(Mandatory=$True, ValueFromPipeline=$True, ParameterSetName='Bucketeer')]
+	[Parameter(Mandatory=$True, ValueFromPipeline=$True, ParameterSetName='Render')]
 	$Data,
 
-	[Parameter(Mandatory=$False, Position = 0)]
+	[Parameter(Mandatory=$False, Position = 0, ParameterSetName='Bucketeer')]
 	[ScriptBlock[]]
 	$KeyFunctions = { param($data) if($data -match '(\d+)') { $Matches[1] } },
 	
-	[Parameter(Mandatory=$False, Position = 1)]
+	[Parameter(Mandatory=$False, Position = 1, ParameterSetName='Bucketeer')]
+	[Parameter(Mandatory=$False, Position = 1, ParameterSetName='Render')]
 	[ScriptBlock]
 	$SortFunction = {[int]$i = 0; if([int]::TryParse($_, [ref] $i)) { $i } else { $_ }},
-
-	[Parameter()]
-	[int]
-	$Width = 80,
-
-	[Parameter()]
+	
+	[Parameter(ParameterSetName='Bucketeer')]
 	[switch]
-	$ReturnData = $False
+	$ReturnData,
+
+	[Parameter(Mandatory=$True, ParameterSetName='Render')]
+	[switch]
+	$Render,
+
+	[Parameter(ParameterSetName='Bucketeer')]
+	[Parameter(ParameterSetName='Render')]
+	[int]
+	$Width = 80
 )
-Begin {
+Begin {	
 	$restLabel = '_rest'
 	$overlapLabel = '_overlap'
 	$averageLabel = 'average'
@@ -93,54 +121,70 @@ Begin {
 	}
 	
 	Write-Debug "Begin"
-	
+
 	$buckets = @{}
 	$rest = New-Object System.Collections.Generic.List[System.Object]
 	$overlap = New-Object System.Collections.Generic.List[System.Object]
-
-	foreach($key in $Order) {
-		$list = New-Object System.Collections.Generic.List[System.Object]
-		$buckets.Add($Key, $list)
-	}
 }
 
 Process {
-	$data = $_	
-	VerboseVar '$data' $data
+	if($PsCmdlet.ParameterSetName -eq 'Bucketeer') {
+		$data = $_	
+		# VerboseVar '$data' $data
 	
-	$matchCount = 0;
-	foreach($keyFunc in $KeyFunctions) {
-		$key = &$keyFunc $data				
+		$matchCount = 0;
+		foreach($keyFunc in $KeyFunctions) {
+			$key = &$keyFunc $data				
 		
-		if($key) {
-			if($key -is [System.Array]) {
-				foreach($i in $key) {
-					VerboseVar '$key' $i	
+			if($key) {
+				if($key -is [System.Array]) {
+					foreach($i in $key) {
+						# VerboseVar '$key' $i	
+						AddData $buckets $key $data 
+						$matchCount++;		
+					}
+				}
+				else {		
+					# VerboseVar '$key' $key
 					AddData $buckets $key $data 
 					$matchCount++;		
 				}
 			}
-			else {		
-				VerboseVar '$key' $key
-				AddData $buckets $key $data 
-				$matchCount++;		
-			}
+		}
+
+		if($matchCount -eq 0) { 
+			Write-Verbose "data matches no bucket"
+			$rest.Add($data)
+		}
+		if($matchCount -gt 1) {
+			Write-Verbose "data overlaps $matchCount buckets"
+			$overlap.Add($data)
 		}
 	}
+	else { # $PsCmdlet.ParameterSetName -eq 'Render'
+		$buckets = $_		
+		VerboseVar '$buckets' $buckets
+		if($buckets -isnot [hashTable]) { Write-Error "can only render hashTables[key] => []"; exit } 
 
-	if($matchCount -eq 0) { 
-		Write-Verbose "data matches no bucket"
-	    $rest.Add($data)
-	}
-	if($matchCount -gt 1) {
-		Write-Verbose "data overlaps $matchCount buckets"
-		$overlap.Add($data)
+
+		if($buckets.ContainsKey($overlapLabel)) {
+			Write-Verbose "found $overlapLabel"
+			$overlap = $buckets[$overlapLabel]
+			$buckets.Remove($overlapLabel)
+		}
+
+		if($buckets.ContainsKey($restLabel)) {
+			Write-Verbose "found $restLabel"
+			$rest = $buckets[$restLabel]
+			$buckets.Remove($restLabel)
+		}
+
 	}
 }
 
 End {
 	Write-Debug "End"
-	
+
 	if($ReturnData)	{
 			$buckets.Add($restLabel, $rest)
 			$buckets.Add($overlapLabel, $overlap)
@@ -151,11 +195,13 @@ End {
 	
 	# line everything up nice
 	$measure = $buckets.Values | %{ $_.Count } | Measure-Object -Average -Maximum -Minimum	
-	$countPadding = $measure.Maximum.ToString().Length
 	
+	$countPadding = "$($measure.Maximum)".Length # measure-null-proof ToString()
 	$labelPadding = ($buckets.Keys | %{ $_.Length } |  Measure-Object -Maximum).Maximum 
-	if($overlapLabel.Length -gt $labelPadding){ $labelPadding = $overlapLabel.Length }
-	if($restLabel.Length -gt $labelPadding){ $labelPadding = $restLabel.Length }
+
+	$HeaderExtraPadding = ' ()'.Length
+	if(($overlapLabel.Length - $HeaderExtraPadding) -gt $labelPadding){ $labelPadding = ($overlapLabel.Length - $HeaderExtraPadding) }
+	if(($restLabel.Length - $HeaderExtraPadding) -gt $labelPadding){ $labelPadding = ($restLabel.Length - $HeaderExtraPadding) }
 
 	DebugVar '$labelPadding' $labelPadding
 	DebugVar '$countPadding' $countPadding
@@ -163,15 +209,15 @@ End {
 	
 	# print special 'bucket' data
 	(@{ Label=$restLabel; Count=$rest.Count }),(@{ Label=$overlapLabel; Count=$overlap.Count }),(@{ Label=$averageLabel; Count=$measure.Average }),(@{ Label=$barChar; Count=([decimal]$measure.Maximum / [decimal]$Width) }) | %{
-		$labelPadded = $_.Label.PadLeft($labelPadding + 4)			
+		$labelPadded = $_.Label.PadLeft($labelPadding + $HeaderExtraPadding)			
 		"$labelPadded : $($_.Count)"
 	}
 		
-	# heder line 
+	# header line 
 	"".PadRight($labelPadding + $countPadding + $Width + 5, '=') 
 	
 	# bucket data output		
-	foreach($key in ($buckets.Keys | sort $SortKeys)) {
+	foreach($key in ($buckets.Keys | sort $SortFunction)) {
 		$datawidth = ( [decimal]$buckets[$key].Count / [decimal]$measure.Maximum ) * $Width
 		DebugVar '$datawidth' $datawidth
 
