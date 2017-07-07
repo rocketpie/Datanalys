@@ -227,4 +227,10 @@ End {
 
 		"$labelPadded ($countPadded): $barVisual"
 	}
+	
+	if($Render){
+		# we removed this data for rendering purposes, so we need to put it back
+		$buckets.Add($restLabel, $rest)
+		$buckets.Add($overlapLabel, $overlap)
+	}
 }	
