@@ -16,7 +16,7 @@
 	.PARAMETER SortFunction
 		custom argument to $buckets | sort $SortFunction 
 
-		the default function tries to interpret keys as ints and falls back to alphanumeric  
+		the default function tries to interpret bucket names (keys) as ints and will fallback to alphanumeric bucket key sort 
 
 	.PARAMETER Width
 		width of the diagram to create (the bin with the most data will be shown this wide)
@@ -29,6 +29,12 @@
 		instead of bucketeering, take a map[key] -> data[]
 		and render it into a histogram
 
+	.PARAMETER AbsoluteWidth
+		make the bar width a fraction of the total data count 
+		(instead of the largest bucket data count)
+
+		This is can be useful when there's a few huge and lots of small buckets
+		
 	.DESCRIPTION
 		Data analysis tool to categorize and visualize data size.
 		accepts key functions to be run on every data.
@@ -59,6 +65,13 @@
 		example keyFunc debugging setup
 		put the keyFunc in a variable, then inspect individual data
 		
+	.EXAMPLE
+		$SortByCount = { -$_.Value.Count } 
+		data | Bucketeer -SortFunction $SortByCount
+		
+		Description
+		-----------
+		sort function that sorts buckets by data count DESC	
 #>
 [CmdletBinding(DefaultParameterSetName = 'Bucketeer')]
 Param (
@@ -73,7 +86,7 @@ Param (
 	[Parameter(Mandatory=$False, Position = 1, ParameterSetName='Bucketeer')]
 	[Parameter(Mandatory=$False, Position = 1, ParameterSetName='Render')]
 	[ScriptBlock]
-	$SortFunction = {[int]$i = 0; if([int]::TryParse($_, [ref] $i)) { $i } else { $_ }},
+	$SortFunction = {[int]$i = 0; if([int]::TryParse($_.Name, [ref] $i)) { $i } else { $_ }},
 	
 	[Parameter(ParameterSetName='Bucketeer')]
 	[switch]
@@ -82,6 +95,10 @@ Param (
 	[Parameter(Mandatory=$True, ParameterSetName='Render')]
 	[switch]
 	$Render,
+	
+	[Parameter(Mandatory=$True, ParameterSetName='Render')]
+	[switch]
+	$AbsoluteWidth,
 
 	[Parameter(ParameterSetName='Bucketeer')]
 	[Parameter(ParameterSetName='Render')]
@@ -194,9 +211,14 @@ End {
 	}
 	
 	# line everything up nice
-	$measure = $buckets.Values | %{ $_.Count } | Measure-Object -Average -Maximum -Minimum	
+	$measure = $buckets.Values | %{ $_.Count } | Measure-Object -Average -Maximum -Minimum -Sum
 	
-	$countPadding = "$($measure.Maximum)".Length # measure-null-proof ToString()
+	$maxwidth = $measure.Maximum
+	if($AbsoluteWidth) {
+		$maxwidth = $measure.Sum
+	}
+	
+	$countPadding = "$maxwidth".Length # measure-null-proof ToString()
 	$labelPadding = ($buckets.Keys | %{ $_.Length } |  Measure-Object -Maximum).Maximum 
 
 	$HeaderExtraPadding = ' ()'.Length
@@ -208,7 +230,7 @@ End {
 
 	
 	# print special 'bucket' data
-	(@{ Label=$restLabel; Count=$rest.Count }),(@{ Label=$overlapLabel; Count=$overlap.Count }),(@{ Label=$averageLabel; Count=$measure.Average }),(@{ Label=$barChar; Count=([decimal]$measure.Maximum / [decimal]$Width) }) | %{
+	(@{ Label='total'; Count=$measure.Sum }),(@{ Label=$restLabel; Count=$rest.Count }),(@{ Label=$overlapLabel; Count=$overlap.Count }),(@{ Label=$averageLabel; Count=$measure.Average }),(@{ Label=$barChar; Count=([decimal]$maxwidth / [decimal]$Width) }) | %{
 		$labelPadded = $_.Label.PadLeft($labelPadding + $HeaderExtraPadding)			
 		"$labelPadded : $($_.Count)"
 	}
@@ -217,12 +239,12 @@ End {
 	"".PadRight($labelPadding + $countPadding + $Width + 5, '=') 
 	
 	# bucket data output		
-	foreach($key in ($buckets.Keys | sort $SortFunction)) {
-		$datawidth = ( [decimal]$buckets[$key].Count / [decimal]$measure.Maximum ) * $Width
+	foreach($bucket in ($buckets.GetEnumerator() | sort $SortFunction)) {
+		$datawidth = ( [decimal]$bucket.Value.Count / [decimal]$maxwidth ) * $Width
 		DebugVar '$datawidth' $datawidth
 
-		$labelPadded = $key.PadLeft($labelPadding)
-		$countPadded = $buckets[$key].Count.ToString().PadLeft($countPadding)
+		$labelPadded = $bucket.Name.PadLeft($labelPadding)
+		$countPadded = $bucket.Value.Count.ToString().PadLeft($countPadding)
 		$barVisual = ''.PadRight($datawidth, $barChar)
 
 		"$labelPadded ($countPadded): $barVisual"
