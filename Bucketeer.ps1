@@ -96,9 +96,9 @@ Param (
 	[switch]
 	$Render,
 	
-	[Parameter(Mandatory=$True, ParameterSetName='Render')]
+	[Parameter(Mandatory=$False, ParameterSetName='Render')]
 	[switch]
-	$AbsoluteWidth,
+	$AbsoluteWidth = $False,
 
 	[Parameter(ParameterSetName='Bucketeer')]
 	[Parameter(ParameterSetName='Render')]
